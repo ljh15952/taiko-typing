@@ -19,10 +19,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install PyInstaller
-        run: pip install pyinstaller
+        run: pip install pyinstaller icoextract
+
+      - name: Extract notepad icon
+        run: icoextract C:\Windows\System32\notepad.exe notepad.ico
 
       - name: Build exe (no console)
-        run: pyinstaller --onefile --windowed --name memo donka_memo.py
+        run: pyinstaller --onefile --windowed --name memo --icon notepad.ico donka_memo.py
 
       - uses: actions/upload-artifact@v4
         with:
