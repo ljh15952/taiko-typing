@@ -3,27 +3,82 @@
   겉모양은 Windows 메모장과 같습니다.
   돈(D): 왼손 f / 오른손 j
   카(K): 왼손 d / 오른손 k
-  묶음 길이는 1~8타 랜덤, 표시된 키를 정확히 쳐야 정답
+  표시된 키를 정확히 쳐야 정답, 지금 칠 손(L/R)은 상태 표시줄에 표시
+  モード(M) 메뉴
+    ランダム: 묶음 길이 1~8타, 돈/카 랜덤
+    練習: 태고의 달인 보면에 자주 나오는 배치를 난이도별로 출제
+  확대/축소: 表示(V) > ズーム(Z), Ctrl + +/-/0, Ctrl + 휠
   종료: Esc 또는 q
 """
 import random
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 
-MIN_LEN, MAX_LEN = 1, 8   # 묶음 길이 랜덤 범위
+MIN_LEN, MAX_LEN = 1, 8   # 랜덤 모드 묶음 길이 범위
 GROUPS_PER_LINE = 5
 KEY = {"D": ("f", "j"), "K": ("d", "k")}  # (왼손, 오른손)
-FONT = ("Consolas", 11)
+FONT_FAMILY, FONT_SIZE = "Consolas", 11
+ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 10, 500, 10  # 메모장과 같은 10% 단위
+# Windows 가상 키 코드. JIS 배열의 ;+ / -= 키, US 배열의 =+ / -_ 키, 텐키
+ZOOM_IN_KEYS = (0xBB, 0x6B)
+ZOOM_OUT_KEYS = (0xBD, 0x6D)
+ZOOM_RESET_KEYS = (0x30, 0x60)
 TITLE = "無題 - メモ帳"
 DON_COLOR = "#E8908A"  # 파스텔 빨강
 KA_COLOR = "#7FB3D5"   # 파스텔 파랑
 DOT = "•"               # D/K 대신 표시할 점 (색으로 구분)
 GAP = "   "
 
+# 연습 모드에서 난이도별로 자주 나오는 배치. (배치, 가중치), 가중치가 클수록 자주 나옴
+#   D=돈, K=카, 공백=한 칸 쉼. 16분을 한 칸으로 보고 붙어 있으면 16분, 한 칸 띄우면 8분,
+#   묶음 사이(GAP)는 4분 간격. 출처: 太鼓の達人 譜面とかWiki 용어집·複合パターン 등 (README 참고)
+PATTERNS = {
+    # かんたん ★1~5: 2분·4분 음표 중심에 가끔 단색 8분. 8분 복합도 거의 없음
+    "easy": [
+        ("D", 10), ("K", 4),                        # ドン / カッ
+        ("D D", 3), ("K K", 1), ("D D D", 1),       # 단색 8분
+    ],
+    # ふつう ★1~7: 8분 음표와 8분 복합이 중심. 16분은 가끔 단발로, 쉬운 배색만
+    "normal": [
+        ("D", 6), ("K", 3),
+        ("D D", 4), ("K K", 2), ("D D D", 3),       # 단색 8분
+        ("D K", 3), ("K D", 2), ("D D K", 3), ("K K D", 2), ("D K D", 2),
+        ("D K K", 1), ("K D D", 1), ("D D D K", 2), ("D K D K", 1), ("D D K K", 1),  # 8분 복합
+        ("DD", 1), ("DDD", 1),                      # 단발 16분 ドコ / ドコドン
+    ],
+    # むずかしい ★1~8: 16분(★4~)과 8분 긴 복합. 복합보다 단색 16분·쉬운 복합을 물량으로
+    "hard": [
+        ("D", 3), ("K", 2),
+        ("D D", 2), ("D K", 2), ("D D K", 2), ("K K D", 1), ("D K D", 1),
+        ("D K D K", 2), ("D D K K", 1), ("D D K D D K", 1), ("K K D K K D", 1),  # 8분 긴 복합
+        ("DD", 2), ("DDD", 6), ("KKK", 2), ("DDDD", 1), ("DDDDD", 3),       # 단색 16분 ドコドン, ドコドコドン
+        ("DDK", 3), ("KKD", 3), ("DKD", 1), ("DK", 1), ("KD", 1),           # 쉬운 16분 복합 (★5~)
+    ],
+    # おに ★1~10 (대부분 ★6~): 16분 복합이 중심, ★7~ 24분, ★9~ 긴 복합
+    # 2~4타 복합의 가중치는 위키의 곡별 최다 출현 횟수를 참고
+    "oni": [
+        ("D", 2), ("K", 1),
+        ("DK", 2), ("KD", 2),
+        ("DDD", 4), ("KKK", 2), ("DDK", 5), ("KKD", 5),                     # 3연타 8종
+        ("DKD", 4), ("KDD", 3), ("DKK", 3), ("KDK", 3),
+        ("DDKD", 3), ("KDDK", 2), ("DDKK", 2), ("DKDD", 2), ("DKKD", 2),    # 4연타 복합
+        ("KKDD", 2), ("KKDK", 2), ("KKKD", 2), ("DDDK", 3),                 # ドドドカ 는 24분에도 많음
+        ("KDDD", 1), ("DKDK", 1), ("DKKK", 1), ("KDKD", 1), ("KDKK", 1),
+        ("DDDDD", 3), ("DKDKD", 2), ("DDKDD", 2), ("KDKKD", 1), ("DKDDK", 1),  # 5연타
+        ("DDDD", 1), ("KKKK", 1), ("DDDDDDD", 1),                           # 단색 연타
+        ("KKDKKDKKD", 1), ("DDDKDDDK", 1), ("DDKKDDKK", 1),                 # 긴 복합: 3타·4타 단위, 2타형
+        ("DKDKDKDK", 1), ("DKKDKKDK", 1), ("DDDKKKDDD", 1),                 # ドカドカ, ドカカ 반복, 3-3
+    ],
+}
+LEVELS = [("easy", "かんたん(E)"), ("normal", "ふつう(N)"),
+          ("hard", "むずかしい(H)"), ("oni", "おに(O)")]
+
 
 class Game:
-    """터미널 버전과 같은 로직"""
-    def __init__(self, mn=MIN_LEN, mx=MAX_LEN):
+    """터미널 버전과 같은 로직. level 이 None 이면 랜덤, 아니면 PATTERNS 의 난이도로 출제"""
+    def __init__(self, level=None, mn=MIN_LEN, mx=MAX_LEN):
+        self.level = level
         self.mn, self.mx = mn, mx
         self.hand = 0
         self.hits = self.misses = self.combo = self.best = 0
@@ -32,19 +87,28 @@ class Game:
         self.new_line()
 
     def new_line(self):
+        # line 에는 노트 (종류, 키, 손) 와 간격 문자열이 섞여 있음
         self.line = []
         for g in range(GROUPS_PER_LINE):
             if g:
-                self.line.append(None)
-            for _ in range(random.randint(self.mn, self.mx)):
-                t = random.choice("DK")
+                self.line.append(GAP)
+            for t in self.group():
+                if t == " ":  # 묶음 안의 한 칸 쉼. 손 순서는 그대로 이어짐
+                    self.line.append(t)
+                    continue
                 h = self.hand % 2
                 self.line.append((t, KEY[t][h], h))
                 self.hand += 1
         self.pos = self._next(0)
 
+    def group(self):
+        if self.level is None:
+            return [random.choice("DK") for _ in range(random.randint(self.mn, self.mx))]
+        pats, weights = zip(*PATTERNS[self.level])
+        return random.choices(pats, weights)[0]
+
     def _next(self, i):
-        while i < len(self.line) and self.line[i] is None:
+        while i < len(self.line) and isinstance(self.line[i], str):
             i += 1
         return i
 
@@ -84,6 +148,7 @@ class Memo:
         self.build_menu()
         self.build_status()
         self.build_text()
+        self.set_zoom(100)
         self.reset()
 
     # ---------- 겉모양 ----------
@@ -119,10 +184,27 @@ class Memo:
         m.add_cascade(label="書式(O)", menu=o)
 
         v = tk.Menu(m, tearoff=0)
-        v.add_command(label="ズーム(Z)")
+        z = tk.Menu(v, tearoff=0)
+        z.add_command(label="拡大(I)", accelerator="Ctrl+プラス",
+                      command=lambda: self.set_zoom(self.zoom + ZOOM_STEP))
+        z.add_command(label="縮小(O)", accelerator="Ctrl+マイナス",
+                      command=lambda: self.set_zoom(self.zoom - ZOOM_STEP))
+        z.add_command(label="既定の倍率に戻す(R)", accelerator="Ctrl+0",
+                      command=lambda: self.set_zoom(100))
+        v.add_cascade(label="ズーム(Z)", menu=z)
         self.status_on = tk.BooleanVar(value=True)
         v.add_checkbutton(label="ステータス バー(S)", variable=self.status_on, command=self.toggle_status)
         m.add_cascade(label="表示(V)", menu=v)
+
+        # 모드: "random" 또는 PATTERNS 의 난이도 키
+        self.mode = tk.StringVar(value="random")
+        md = tk.Menu(m, tearoff=0)
+        md.add_radiobutton(label="ランダム(R)", variable=self.mode, value="random", command=self.reset)
+        p = tk.Menu(md, tearoff=0)
+        for level, label in LEVELS:
+            p.add_radiobutton(label=label, variable=self.mode, value=level, command=self.reset)
+        md.add_cascade(label="練習(P)", menu=p)
+        m.add_cascade(label="モード(M)", menu=md)
 
         h = tk.Menu(m, tearoff=0)
         h.add_command(label="ヘルプの表示(H)")
@@ -137,7 +219,8 @@ class Memo:
         self.status.pack(side="bottom", fill="x")
         tk.Frame(self.status, bg="#d9d9d9", height=1).pack(side="top", fill="x")
         self.cells = {}
-        for name, width in [("enc", 16), ("eol", 16), ("zoom", 7), ("pos", 20)]:
+        # 오른쪽부터 쌓으므로 화면에는 hand | pos | zoom | eol | enc 순서
+        for name, width in [("enc", 16), ("eol", 16), ("zoom", 7), ("pos", 20), ("hand", 5)]:
             cell = tk.Label(self.status, text="", bg="#f0f0f0", anchor="w",
                             width=width, font=("Segoe UI", 9), padx=6)
             cell.pack(side="right")
@@ -157,7 +240,8 @@ class Memo:
         self.frame.pack(fill="both", expand=True)
         sy = tk.Scrollbar(self.frame, orient="vertical")
         sx = tk.Scrollbar(self.frame, orient="horizontal")
-        self.text = tk.Text(self.frame, font=FONT, wrap="none", undo=False,
+        self.font = tkfont.Font(family=FONT_FAMILY, size=FONT_SIZE)  # 줌은 이 글꼴 크기를 바꿈
+        self.text = tk.Text(self.frame, font=self.font, wrap="none", undo=False,
                             relief="flat", borderwidth=0, padx=4, pady=2,
                             insertwidth=1, insertofftime=530, insertontime=530,
                             selectbackground="#0078d7", selectforeground="white",
@@ -171,6 +255,7 @@ class Memo:
         self.text.bind("<Control-n>", lambda e: (self.reset(), "break")[1])
         self.text.bind("<Control-N>", lambda e: (self.reset(), "break")[1])
         self.text.bind("<Key>", self.on_key)
+        self.text.bind("<Control-MouseWheel>", self.on_wheel)
         # 클릭으로 커서가 움직이지 않게
         for ev in ("<Button-1>", "<B1-Motion>", "<Double-Button-1>", "<Triple-Button-1>"):
             self.text.bind(ev, lambda e: (self.text.focus_set(), "break")[1])
@@ -182,7 +267,8 @@ class Memo:
 
     # ---------- 연습 로직 (터미널 버전과 동일) ----------
     def reset(self):
-        self.game = Game()
+        mode = self.mode.get()
+        self.game = Game(None if mode == "random" else mode)
         self.root.title(TITLE)
         self.draw()
 
@@ -195,6 +281,14 @@ class Memo:
         if e.keysym == "Escape" or ch == "q":
             self.root.destroy()
             return "break"
+        if e.state & 0x0004:  # Ctrl 조합은 타건으로 세지 않고 메모장 줌 단축키만 처리
+            if e.keycode in ZOOM_IN_KEYS:
+                self.set_zoom(self.zoom + ZOOM_STEP)
+            elif e.keycode in ZOOM_OUT_KEYS:
+                self.set_zoom(self.zoom - ZOOM_STEP)
+            elif e.keycode in ZOOM_RESET_KEYS:
+                self.set_zoom(100)
+            return "break"
         if ch and ch in "fdjk":
             self.game.press(ch)
             if self.game.hits == 1:
@@ -202,13 +296,23 @@ class Memo:
             self.draw()
         return "break"
 
+    def on_wheel(self, e):
+        self.set_zoom(self.zoom + (ZOOM_STEP if e.delta > 0 else -ZOOM_STEP))
+        return "break"
+
+    def set_zoom(self, pct):
+        self.zoom = max(ZOOM_MIN, min(ZOOM_MAX, pct))
+        self.font.configure(size=max(1, round(FONT_SIZE * self.zoom / 100)))
+        self.cells["zoom"].config(text=f"{self.zoom}%")
+        self.text.see("insert")  # 확대해도 지금 칠 노트가 화면 밖으로 나가지 않게
+
     def draw(self):
         g = self.game
         pat, mark = "", ""
         cur_col = 0
         for i, n in enumerate(g.line):
-            if n is None:
-                pat += GAP; mark += GAP
+            if isinstance(n, str):  # 간격
+                pat += n; mark += n
                 continue
             if i == g.pos:
                 cur_col = 2 + len(pat)
@@ -224,8 +328,9 @@ class Memo:
                 t.tag_add(c, f"1.{2 + i}", f"1.{3 + i}")
         t.tag_add("done", "1.2", f"1.{cur_col}")  # 지나간 노트는 회색
         t.mark_set("insert", f"1.{cur_col}")
-        self.cells["pos"].config(text=f"行 1、列 {cur_col + 1}")
-        self.cells["zoom"].config(text="100%")
+        t.see("insert")
+        self.cells["pos"].config(text=f"行 1, 列 {cur_col + 1}")
+        self.cells["hand"].config(text="LR"[g.line[g.pos][2]])
 
 
 def disable_ime(root, widget):
