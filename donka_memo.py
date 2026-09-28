@@ -7,6 +7,7 @@
   モード(M) 메뉴
     ランダム: 묶음 길이 1~8타, 돈/카 랜덤
     練習: 태고의 달인 보면에 자주 나오는 배치를 난이도별로 출제
+    音符を流す: 켜면 음표가 BPM 에 맞춰 왼쪽으로 흘러가고 판정 원에서 타이밍 판정 (良/可/不可)
   확대/축소: 表示(V) > ズーム(Z), Ctrl + +/-/0, Ctrl + 휠
   종료: Esc 또는 q
 """
@@ -14,6 +15,7 @@ import random
 import time
 import tkinter as tk
 import tkinter.font as tkfont
+import tkinter.simpledialog as simpledialog
 
 MIN_LEN, MAX_LEN = 1, 8   # 랜덤 모드 묶음 길이 범위
 GROUPS_PER_LINE = 5
@@ -28,7 +30,20 @@ TITLE = "無題 - メモ帳"
 DON_COLOR = "#E8908A"  # 파스텔 빨강
 KA_COLOR = "#7FB3D5"   # 파스텔 파랑
 DOT = "•"               # D/K 대신 표시할 점 (색으로 구분)
+DONE_COLOR = "#a0a0a0"  # 지나간 노트
 GAP = "   "
+
+# 이동 모드. 실제 게임처럼 흐르는 속도는 BPM 에 비례하고 16분 한 칸의 간격은 BPM 과 상관없이 같음
+BPM_PRESETS = (60, 80, 100, 120, 140, 160, 180, 200, 220, 240)
+BPM_MIN, BPM_MAX, BPM_DEFAULT = 30, 400, 120
+LEAD_IN = 2.0   # 시작하고 첫 노트가 판정 위치에 올 때까지(초)
+FRAME_MS = 10   # 화면 갱신 간격
+RING_COLOR, RING_FILL = "#a0a0a0", "#ececec"  # 판정 틀 테두리, 안쪽
+DOT_CY = 0.545  # 점(•) 글자의 세로 가운데. 줄 높이에 대한 비율 (Consolas 로 확대 100~300% 에서 잰 값)
+# 판정 폭(초): 良, 可, 不可. 太鼓の達人 譜面とかWiki「基本システム」의 표. 랜덤은 おに 기준
+JUDGE = {"easy": (0.041708, 0.108442, 0.125125), "normal": (0.041708, 0.108442, 0.125125),
+         "hard": (0.025025, 0.075075, 0.108442), "oni": (0.025025, 0.075075, 0.108442)}
+HIT = ("良", "可")
 
 # 연습 모드에서 난이도별로 자주 나오는 배치. (배치, 가중치), 가중치가 클수록 자주 나옴
 #   D=돈, K=카, 공백=한 칸 쉼. 16분을 한 칸으로 보고 붙어 있으면 16분, 한 칸 띄우면 8분,
@@ -140,9 +155,82 @@ class Game:
         return round(self.hits / total * 100) if total else 100
 
 
+class Note:
+    """이동 모드의 노트 하나"""
+    def __init__(self, at, t, key, h):
+        self.at, self.t, self.key, self.h = at, t, key, h  # 판정 위치에 오는 시각(초), 종류, 키, 손
+        self.res = None   # 판정. 아직이면 None
+        self.item = None  # 캔버스 아이템
+
+
+class Flow:
+    """이동 모드. 정지 모드와 같은 방법으로 만든 줄을 16분 = 한 칸 간격으로 흘려보내고 타이밍으로 판정"""
+    def __init__(self, level=None, bpm=BPM_DEFAULT):
+        self.src = Game(level)      # 배치와 손 순서는 정지 모드와 똑같이 만듦
+        self.step = 60 / bpm / 4    # 16분 한 칸의 시간(초)
+        self.good, self.ok, self.bad = JUDGE.get(level, JUDGE["oni"])
+        self.notes = []             # 아직 화면에 있는 노트 (시각 순)
+        self.next = 0               # 아직 판정 안 된 첫 노트의 번호
+        self.end = LEAD_IN          # 다음 칸의 시각
+        self.hits = self.misses = self.combo = self.best = 0
+
+    def fill(self, until):
+        """until 초까지 올 노트를 만든다. 줄 사이도 묶음 사이처럼 GAP 만큼 띄움"""
+        while self.end < until:
+            for n in self.src.line:
+                if isinstance(n, str):
+                    self.end += len(n) * self.step
+                else:
+                    self.notes.append(Note(self.end, *n))
+                    self.end += self.step
+            self.end += len(GAP) * self.step
+            self.src.new_line()
+
+    def prune(self, before):
+        """판정이 끝났고 before 초보다 앞선 노트를 빼서 돌려준다"""
+        i = 0
+        while i < self.next and self.notes[i].at < before:
+            i += 1
+        gone, self.notes = self.notes[:i], self.notes[i:]
+        self.next -= i
+        return gone
+
+    def upcoming(self):
+        return self.notes[self.next] if self.next < len(self.notes) else None
+
+    def expire(self, now):
+        """판정 폭을 지나친 노트는 不可"""
+        while self.next < len(self.notes) and now > self.notes[self.next].at + self.bad:
+            self.judge("不可")
+
+    def press(self, k, now):
+        self.expire(now)
+        n = self.upcoming()
+        if n is None or now < n.at - self.bad:
+            return None  # 칠 노트가 아직 판정 폭 밖이면 헛치기로 보고 무시
+        if k != n.key:
+            return self.judge("手順ミス" if k in KEY[n.t] else "不可")
+        dt = abs(now - n.at)
+        return self.judge("良" if dt <= self.good else "可" if dt <= self.ok else "不可")
+
+    def judge(self, res):
+        self.notes[self.next].res = res
+        self.next += 1
+        if res in HIT:
+            self.hits += 1
+            self.combo += 1
+            self.best = max(self.best, self.combo)
+        else:
+            self.misses += 1
+            self.combo = 0
+        return res
+
+
 class Memo:
     def __init__(self, root):
         self.root = root
+        self.flow = None      # 이동 모드일 때의 Flow
+        self.after_id = None  # 이동 모드 화면 갱신 예약
         root.title(TITLE)
         root.geometry("820x520")
         self.build_menu()
@@ -204,6 +292,17 @@ class Memo:
         for level, label in LEVELS:
             p.add_radiobutton(label=label, variable=self.mode, value=level, command=self.reset)
         md.add_cascade(label="練習(P)", menu=p)
+        md.add_separator()
+        # 켜면 이동 모드, 끄면 정지 모드. 위의 어느 모드와도 함께 쓸 수 있음
+        self.flow_on = tk.BooleanVar(value=False)
+        md.add_checkbutton(label="音符を流す(S)", variable=self.flow_on, command=self.reset)
+        self.bpm = tk.IntVar(value=BPM_DEFAULT)
+        b = tk.Menu(md, tearoff=0)
+        for v in BPM_PRESETS:
+            b.add_radiobutton(label=str(v), variable=self.bpm, value=v, command=self.on_bpm)
+        b.add_separator()
+        b.add_command(label="その他(O)...", command=self.ask_bpm)
+        md.add_cascade(label="BPM(B)", menu=b)
         m.add_cascade(label="モード(M)", menu=md)
 
         h = tk.Menu(m, tearoff=0)
@@ -251,15 +350,18 @@ class Memo:
         sy.pack(side="right", fill="y")
         sx.pack(side="bottom", fill="x")
         self.text.pack(side="left", fill="both", expand=True)
+        # 이동 모드는 부드럽게 움직이도록 캔버스에 그림. 겉모양은 Text 와 같고 모드에 따라 바꿔 끼움
+        self.canvas = tk.Canvas(self.frame, bg=self.text.cget("bg"), highlightthickness=0, bd=0)
 
-        self.text.bind("<Control-n>", lambda e: (self.reset(), "break")[1])
-        self.text.bind("<Control-N>", lambda e: (self.reset(), "break")[1])
-        self.text.bind("<Key>", self.on_key)
-        self.text.bind("<Control-MouseWheel>", self.on_wheel)
-        # 클릭으로 커서가 움직이지 않게
-        for ev in ("<Button-1>", "<B1-Motion>", "<Double-Button-1>", "<Triple-Button-1>"):
-            self.text.bind(ev, lambda e: (self.text.focus_set(), "break")[1])
-        self.text.tag_config("done", foreground="#a0a0a0")
+        for w in (self.text, self.canvas):
+            w.bind("<Control-n>", lambda e: (self.reset(), "break")[1])
+            w.bind("<Control-N>", lambda e: (self.reset(), "break")[1])
+            w.bind("<Key>", self.on_key)
+            w.bind("<Control-MouseWheel>", self.on_wheel)
+            # 클릭으로 커서가 움직이지 않게
+            for ev in ("<Button-1>", "<B1-Motion>", "<Double-Button-1>", "<Triple-Button-1>"):
+                w.bind(ev, lambda e: (e.widget.focus_set(), "break")[1])
+        self.text.tag_config("done", foreground=DONE_COLOR)
         self.text.tag_config("D", foreground=DON_COLOR)
         self.text.tag_config("K", foreground=KA_COLOR)
         self.text.tag_raise("done")  # 지나간 노트는 회색이 우선
@@ -268,9 +370,34 @@ class Memo:
     # ---------- 연습 로직 (터미널 버전과 동일) ----------
     def reset(self):
         mode = self.mode.get()
-        self.game = Game(None if mode == "random" else mode)
+        level = None if mode == "random" else mode
+        self.stop_flow()
         self.root.title(TITLE)
-        self.draw()
+        if self.flow_on.get():
+            self.flow = Flow(level, self.bpm.get())
+            self.show(self.canvas)
+            self.start_flow()
+        else:
+            self.game = Game(level)
+            self.show(self.text)
+            self.draw()
+
+    def show(self, w):
+        other = self.canvas if w is self.text else self.text
+        other.pack_forget()
+        w.pack(side="left", fill="both", expand=True)
+        w.focus_set()
+
+    def on_bpm(self):
+        if self.flow_on.get():  # 정지 모드에서는 값만 기억
+            self.reset()
+
+    def ask_bpm(self):
+        v = simpledialog.askinteger("BPM", f"BPM ({BPM_MIN}〜{BPM_MAX})", parent=self.root,
+                                    initialvalue=self.bpm.get(), minvalue=BPM_MIN, maxvalue=BPM_MAX)
+        if v:
+            self.bpm.set(v)
+            self.on_bpm()
 
     def on_key(self, e):
         # Windows 에서 0x0008 은 NumLock 이므로 보지 않음. Alt 는 0x20000
@@ -290,10 +417,18 @@ class Memo:
                 self.set_zoom(100)
             return "break"
         if ch and ch in "fdjk":
-            self.game.press(ch)
-            if self.game.hits == 1:
+            if self.flow:
+                now = time.perf_counter() - self.t0
+                res = self.flow.press(ch, now)
+                if res:
+                    self.show_judge(res, now)
+                g = self.flow
+            else:
+                self.game.press(ch)
+                self.draw()
+                g = self.game
+            if g.hits == 1:
                 self.root.title("*" + TITLE)
-            self.draw()
         return "break"
 
     def on_wheel(self, e):
@@ -332,8 +467,81 @@ class Memo:
         self.cells["pos"].config(text=f"行 1, 列 {cur_col + 1}")
         self.cells["hand"].config(text="LR"[g.line[g.pos][2]])
 
+    # ---------- 이동 모드 ----------
+    def start_flow(self):
+        c = self.canvas
+        # 판정 틀: 실제 게임처럼 원 두 개. 먼저 만들어서 노트가 그 위를 지나가게 함
+        self.ring_in = c.create_oval(0, 0, 0, 0, fill=RING_FILL, outline="")
+        self.ring_out = c.create_oval(0, 0, 0, 0, outline=RING_COLOR, width=1)
+        self.mark = c.create_text(0, 0, text="^", anchor="nw", font=self.font)
+        self.judge_text = c.create_text(0, 0, text="", anchor="nw", font=self.font)
+        self.judge_until = 0
+        self.shown_hand = None
+        self.cells["pos"].config(text="行 1, 列 3")
+        self.t0 = time.perf_counter()
+        self.tick()
 
-def disable_ime(root, widget):
+    def stop_flow(self):
+        if self.after_id:
+            self.root.after_cancel(self.after_id)
+            self.after_id = None
+        self.flow = None
+        self.canvas.delete("all")
+
+    def tick(self):
+        f, c = self.flow, self.canvas
+        now = time.perf_counter() - self.t0
+        f.expire(now)
+        cw, lh = self.font.measure("0"), self.font.metrics("linespace")
+        x0, y0 = 4 + 2 * cw, 2  # 판정 위치 = 정지 모드에서 첫 노트가 있는 칸 (Text 의 padx, pady 와 맞춤)
+        speed = cw / f.step     # 1초에 움직이는 픽셀. 16분 한 칸이 글자 한 칸
+        right = c.winfo_width()
+        f.fill(now + (right - x0) / speed + f.step)
+        for n in f.prune(now - (x0 + cw) / speed):  # 왼쪽 밖으로 나간 노트
+            if n.item:
+                c.delete(n.item)
+        for n in f.notes:
+            x = x0 + (n.at - now) * speed
+            if x > right:  # 아직 화면 밖. 확대해서 밀려난 노트는 지웠다가 다시 들어올 때 그림
+                if n.item is None:
+                    break
+                c.delete(n.item)
+                n.item = None
+                continue
+            if n.res in HIT:  # 친 노트는 실제 게임처럼 사라짐
+                if n.item:
+                    c.delete(n.item)
+                    n.item = None
+                continue
+            if n.item is None:
+                n.item = c.create_text(x, y0, text=DOT, anchor="nw", font=self.font,
+                                       fill=DON_COLOR if n.t == "D" else KA_COLOR)
+            else:
+                c.coords(n.item, x, y0)
+            if n.res:  # 놓친 노트는 회색으로 흘러감
+                c.itemconfig(n.item, fill=DONE_COLOR)
+        cx, cy = x0 + cw / 2, y0 + lh * DOT_CY  # 판정 위치에 온 노트(점)의 가운데
+        for ring, r in ((self.ring_in, lh * 0.25), (self.ring_out, lh * 0.45)):
+            c.coords(ring, cx - r, cy - r, cx + r, cy + r)
+        c.coords(self.mark, x0, y0 + lh)
+        c.coords(self.judge_text, x0 + 2 * cw, y0 + lh)
+        if now > self.judge_until:
+            c.itemconfig(self.judge_text, text="")
+        n = f.upcoming()
+        hand = "LR"[n.h] if n else ""
+        if hand != self.shown_hand:
+            self.cells["hand"].config(text=hand)
+            self.shown_hand = hand
+        self.after_id = self.root.after(FRAME_MS, self.tick)
+
+    def show_judge(self, res, now):
+        # 실제 게임처럼 콤보는 10부터 표시. 흘려보낸 노트는 판정을 표시하지 않음
+        combo = self.flow.combo
+        self.canvas.itemconfig(self.judge_text, text=res + (f"  {combo}" if combo >= 10 else ""))
+        self.judge_until = now + 0.5
+
+
+def disable_ime(root, *widgets):
     try:
         import ctypes
         imm = ctypes.windll.imm32
@@ -342,7 +550,7 @@ def disable_ime(root, widget):
         imm.ImmAssociateContext.restype = ctypes.c_void_p
         user.GetParent.argtypes = [ctypes.c_void_p]
         user.GetParent.restype = ctypes.c_void_p
-        for hwnd in (widget.winfo_id(), root.winfo_id(), user.GetParent(root.winfo_id())):
+        for hwnd in [w.winfo_id() for w in widgets] + [root.winfo_id(), user.GetParent(root.winfo_id())]:
             if hwnd:
                 imm.ImmAssociateContext(hwnd, None)
     except Exception:
@@ -395,5 +603,5 @@ if __name__ == "__main__":
     app = Memo(root)
     root.update()
     set_notepad_icon(root)
-    disable_ime(root, app.text)  # 일본어 IME 가 켜져 있어도 f/d/j/k 가 바로 입력되도록
+    disable_ime(root, app.text, app.canvas)  # 일본어 IME 가 켜져 있어도 f/d/j/k 가 바로 입력되도록
     root.mainloop()
