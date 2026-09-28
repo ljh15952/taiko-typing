@@ -21,6 +21,7 @@ import tkinter.simpledialog as simpledialog
 MIN_LEN, MAX_LEN = 1, 8   # 랜덤 모드 묶음 길이 범위
 GROUPS_PER_LINE = 5
 KEY = {"D": ("f", "j"), "K": ("d", "k")}  # (왼손, 오른손)
+HAND_OF = {k: h for keys in KEY.values() for h, k in enumerate(keys)}  # 키 -> 손 (0=왼손, 1=오른손)
 FONT_FAMILY, FONT_SIZE = "Consolas", 11
 ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 10, 500, 10  # 메모장과 같은 10% 단위
 # Windows 가상 키 코드. JIS 배열의 ;+ / -= 키, US 배열의 =+ / -_ 키, 텐키
@@ -171,7 +172,8 @@ class Note:
 
 class Flow:
     """이동 모드. 정지 모드와 같은 방법으로 만든 배치를 16분 = 한 칸 간격으로 흘려보내고 타이밍으로 판정
-    손은 노트마다 미리 정하지 않고 맞게 쳤을 때만 다음 손으로 넘어감. 가만히 있으면 처음의 왼손 그대로"""
+    손은 노트마다 미리 정하지 않고, 판정과 상관없이 방금 누른 손의 반대가 다음 손.
+    누르지 않고 흘려보낸 노트로는 바뀌지 않으므로 가만히 있으면 처음의 왼손 그대로"""
     def __init__(self, level=None, bpm=BPM_DEFAULT):
         self.src = Game(level)      # 배치는 정지 모드와 똑같이 만듦
         self.step = 60 / bpm / 4    # 16분 한 칸의 시간(초)
@@ -211,11 +213,12 @@ class Flow:
             self.judge("不可")
 
     def press(self, k, now):
+        want, self.hand = self.hand, 1 - HAND_OF[k]  # L 을 누르면 다음은 판정과 상관없이 R
         self.expire(now)
         n = self.upcoming()
         if n is None or now < n.at - self.bad:
-            return None  # 칠 노트가 아직 판정 폭 밖이면 헛치기로 보고 무시
-        if k != KEY[n.t][self.hand]:
+            return None  # 칠 노트가 아직 판정 폭 밖이면 헛치기로 보고 판정하지 않음
+        if k != KEY[n.t][want]:
             return self.judge("手順ミス" if k in KEY[n.t] else "不可")
         dt = abs(now - n.at)
         return self.judge("良" if dt <= self.good else "可" if dt <= self.ok else "不可")
@@ -224,7 +227,6 @@ class Flow:
         self.notes[self.next].res = res
         self.next += 1
         if res in HIT:
-            self.hand ^= 1  # 놓쳤을 때는 손을 그대로 둠
             self.hits += 1
             self.combo += 1
             self.best = max(self.best, self.combo)
