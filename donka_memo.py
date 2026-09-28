@@ -7,7 +7,8 @@
   モード(M) 메뉴
     ランダム: 묶음 길이 1~8타, 돈/카 랜덤
     練習: 태고의 달인 보면에 자주 나오는 배치를 난이도별로 출제
-    音符を流す: 켜면 음표가 BPM 에 맞춰 왼쪽으로 흘러가고 판정 원에서 타이밍 판정 (良/可/不可)
+    音符を流す: 끄면 정지 모드. 맨 왼쪽 음표를 맞게 치면 사라지고 나머지가 왼쪽으로 당겨짐
+                켜면 이동 모드. 음표가 BPM 에 맞춰 왼쪽으로 흘러가고 판정 원에서 타이밍 판정 (良/可/不可)
   확대/축소: 表示(V) > ズーム(Z), Ctrl + +/-/0, Ctrl + 휠
   종료: Esc 또는 q
 """
@@ -30,7 +31,6 @@ TITLE = "無題 - メモ帳"
 DON_COLOR = "#E8908A"  # 파스텔 빨강
 KA_COLOR = "#7FB3D5"   # 파스텔 파랑
 DOT = "•"               # D/K 대신 표시할 점 (색으로 구분)
-DONE_COLOR = "#a0a0a0"  # 지나간 노트
 GAP = "   "
 
 # 이동 모드. 실제 게임처럼 흐르는 속도는 BPM 에 비례하고 16분 한 칸의 간격은 BPM 과 상관없이 같음
@@ -91,7 +91,8 @@ LEVELS = [("easy", "かんたん(E)"), ("normal", "ふつう(N)"),
 
 
 class Game:
-    """터미널 버전과 같은 로직. level 이 None 이면 랜덤, 아니면 PATTERNS 의 난이도로 출제"""
+    """정지 모드. level 이 None 이면 랜덤, 아니면 PATTERNS 의 난이도로 출제
+    line 은 지금 칠 노트로 시작하는 끝없는 줄. 친 노트는 앞에서 빠지고 뒤에 새 묶음이 붙음"""
     def __init__(self, level=None, mn=MIN_LEN, mx=MAX_LEN):
         self.level = level
         self.mn, self.mx = mn, mx
@@ -99,22 +100,27 @@ class Game:
         self.hits = self.misses = self.combo = self.best = 0
         self.times = []
         self.msg = ""
-        self.new_line()
+        self.line = self.make_line()
 
-    def new_line(self):
-        # line 에는 노트 (종류, 키, 손) 와 간격 문자열이 섞여 있음
-        self.line = []
+    def make_line(self):
+        # 노트 (종류, 키, 손) 와 간격 문자열이 섞인 GROUPS_PER_LINE 묶음
+        line = []
         for g in range(GROUPS_PER_LINE):
             if g:
-                self.line.append(GAP)
+                line.append(GAP)
             for t in self.group():
                 if t == " ":  # 묶음 안의 한 칸 쉼. 손 순서는 그대로 이어짐
-                    self.line.append(t)
+                    line.append(t)
                     continue
                 h = self.hand % 2
-                self.line.append((t, KEY[t][h], h))
+                line.append((t, KEY[t][h], h))
                 self.hand += 1
-        self.pos = self._next(0)
+        return line
+
+    def fill(self, cells):
+        """줄이 cells 칸 이상이 되도록 뒤에 이어 붙임. 이어지는 곳도 묶음 사이처럼 GAP 만큼 띄움"""
+        while sum(len(n) if isinstance(n, str) else 1 for n in self.line) < cells:
+            self.line += [GAP] + self.make_line()
 
     def group(self):
         if self.level is None:
@@ -128,16 +134,16 @@ class Game:
         return i
 
     def press(self, k):
-        t, want, _ = self.line[self.pos]
+        t, want, _ = self.line[0]
         if k == want:
             self.hits += 1
             self.combo += 1
             self.best = max(self.best, self.combo)
             self.times.append(time.time())
             self.msg = f"{self.combo} COMBO!" if self.combo % 50 == 0 else ""
-            self.pos = self._next(self.pos + 1)
-            if self.pos >= len(self.line):
-                self.new_line()
+            if self._next(1) >= len(self.line):  # 뒤에 노트가 없으면 먼저 이어 붙임
+                self.line += [GAP] + self.make_line()
+            del self.line[:self._next(1)]  # 친 노트와 그 뒤 간격을 빼서 다음 노트가 맨 앞으로
             return True
         self.misses += 1
         self.combo = 0
@@ -157,34 +163,35 @@ class Game:
 
 class Note:
     """이동 모드의 노트 하나"""
-    def __init__(self, at, t, key, h):
-        self.at, self.t, self.key, self.h = at, t, key, h  # 판정 위치에 오는 시각(초), 종류, 키, 손
+    def __init__(self, at, t):
+        self.at, self.t = at, t  # 판정 위치에 오는 시각(초), 종류(D/K)
         self.res = None   # 판정. 아직이면 None
         self.item = None  # 캔버스 아이템
 
 
 class Flow:
-    """이동 모드. 정지 모드와 같은 방법으로 만든 줄을 16분 = 한 칸 간격으로 흘려보내고 타이밍으로 판정"""
+    """이동 모드. 정지 모드와 같은 방법으로 만든 배치를 16분 = 한 칸 간격으로 흘려보내고 타이밍으로 판정
+    손은 노트마다 미리 정하지 않고 맞게 쳤을 때만 다음 손으로 넘어감. 가만히 있으면 처음의 왼손 그대로"""
     def __init__(self, level=None, bpm=BPM_DEFAULT):
-        self.src = Game(level)      # 배치와 손 순서는 정지 모드와 똑같이 만듦
+        self.src = Game(level)      # 배치는 정지 모드와 똑같이 만듦
         self.step = 60 / bpm / 4    # 16분 한 칸의 시간(초)
         self.good, self.ok, self.bad = JUDGE.get(level, JUDGE["oni"])
         self.notes = []             # 아직 화면에 있는 노트 (시각 순)
         self.next = 0               # 아직 판정 안 된 첫 노트의 번호
         self.end = LEAD_IN          # 다음 칸의 시각
+        self.hand = 0               # 다음에 칠 손 (0=왼손, 1=오른손)
         self.hits = self.misses = self.combo = self.best = 0
 
     def fill(self, until):
-        """until 초까지 올 노트를 만든다. 줄 사이도 묶음 사이처럼 GAP 만큼 띄움"""
+        """until 초까지 올 노트를 만든다. 이어지는 곳도 묶음 사이처럼 GAP 만큼 띄움"""
         while self.end < until:
-            for n in self.src.line:
+            for n in self.src.make_line():
                 if isinstance(n, str):
                     self.end += len(n) * self.step
                 else:
-                    self.notes.append(Note(self.end, *n))
+                    self.notes.append(Note(self.end, n[0]))
                     self.end += self.step
             self.end += len(GAP) * self.step
-            self.src.new_line()
 
     def prune(self, before):
         """판정이 끝났고 before 초보다 앞선 노트를 빼서 돌려준다"""
@@ -208,7 +215,7 @@ class Flow:
         n = self.upcoming()
         if n is None or now < n.at - self.bad:
             return None  # 칠 노트가 아직 판정 폭 밖이면 헛치기로 보고 무시
-        if k != n.key:
+        if k != KEY[n.t][self.hand]:
             return self.judge("手順ミス" if k in KEY[n.t] else "不可")
         dt = abs(now - n.at)
         return self.judge("良" if dt <= self.good else "可" if dt <= self.ok else "不可")
@@ -217,6 +224,7 @@ class Flow:
         self.notes[self.next].res = res
         self.next += 1
         if res in HIT:
+            self.hand ^= 1  # 놓쳤을 때는 손을 그대로 둠
             self.hits += 1
             self.combo += 1
             self.best = max(self.best, self.combo)
@@ -229,6 +237,7 @@ class Flow:
 class Memo:
     def __init__(self, root):
         self.root = root
+        self.game = None      # 정지 모드일 때의 Game
         self.flow = None      # 이동 모드일 때의 Flow
         self.after_id = None  # 이동 모드 화면 갱신 예약
         root.title(TITLE)
@@ -342,9 +351,9 @@ class Memo:
         self.font = tkfont.Font(family=FONT_FAMILY, size=FONT_SIZE)  # 줌은 이 글꼴 크기를 바꿈
         self.text = tk.Text(self.frame, font=self.font, wrap="none", undo=False,
                             relief="flat", borderwidth=0, padx=4, pady=2,
-                            insertwidth=1, insertofftime=530, insertontime=530,
                             selectbackground="#0078d7", selectforeground="white",
                             yscrollcommand=sy.set, xscrollcommand=sx.set)
+        self.text.config(insertbackground=self.text.cget("bg"))  # 커서는 배경색으로 그려서 안 보이게
         sy.config(command=self.text.yview)
         sx.config(command=self.text.xview)
         sy.pack(side="right", fill="y")
@@ -361,13 +370,12 @@ class Memo:
             # 클릭으로 커서가 움직이지 않게
             for ev in ("<Button-1>", "<B1-Motion>", "<Double-Button-1>", "<Triple-Button-1>"):
                 w.bind(ev, lambda e: (e.widget.focus_set(), "break")[1])
-        self.text.tag_config("done", foreground=DONE_COLOR)
+        self.text.bind("<Configure>", lambda e: self.redraw())  # 창 폭이 바뀌면 줄을 끝까지 다시 채움
         self.text.tag_config("D", foreground=DON_COLOR)
         self.text.tag_config("K", foreground=KA_COLOR)
-        self.text.tag_raise("done")  # 지나간 노트는 회색이 우선
         self.text.focus_set()
 
-    # ---------- 연습 로직 (터미널 버전과 동일) ----------
+    # ---------- 연습 로직 ----------
     def reset(self):
         mode = self.mode.get()
         level = None if mode == "random" else mode
@@ -439,33 +447,26 @@ class Memo:
         self.zoom = max(ZOOM_MIN, min(ZOOM_MAX, pct))
         self.font.configure(size=max(1, round(FONT_SIZE * self.zoom / 100)))
         self.cells["zoom"].config(text=f"{self.zoom}%")
-        self.text.see("insert")  # 확대해도 지금 칠 노트가 화면 밖으로 나가지 않게
+        self.redraw()  # 정지 모드는 창에 들어가는 칸 수가 바뀌므로 다시 채움
+
+    def redraw(self):
+        if self.game and not self.flow:
+            self.draw()
 
     def draw(self):
-        g = self.game
-        pat, mark = "", ""
-        cur_col = 0
-        for i, n in enumerate(g.line):
-            if isinstance(n, str):  # 간격
-                pat += n; mark += n
-                continue
-            if i == g.pos:
-                cur_col = 2 + len(pat)
-            pat += n[0]  # 색 지정을 위해 내부적으로는 D/K 로 기록
-            mark += "^" if i == g.pos else " "
-        lines = ["  " + pat, "  " + mark]
-        t = self.text
+        # 칠 노트는 항상 맨 왼쪽(3번째 칸). 친 노트는 줄에서 빠지므로 나머지가 왼쪽으로 당겨짐
+        g, t = self.game, self.text
+        g.fill(t.winfo_width() // max(1, self.font.measure("0")))  # 창 오른쪽 끝까지 채움
+        pat = "".join(n if isinstance(n, str) else n[0] for n in g.line)  # 색 지정을 위해 내부적으로는 D/K
         t.delete("1.0", "end")
-        shown = [l.replace("D", DOT).replace("K", DOT) for l in lines]
-        t.insert("1.0", "\n".join(shown))
+        t.insert("1.0", "  " + pat.replace("D", DOT).replace("K", DOT))
         for i, c in enumerate(pat):
             if c in "DK":
                 t.tag_add(c, f"1.{2 + i}", f"1.{3 + i}")
-        t.tag_add("done", "1.2", f"1.{cur_col}")  # 지나간 노트는 회색
-        t.mark_set("insert", f"1.{cur_col}")
-        t.see("insert")
-        self.cells["pos"].config(text=f"行 1, 列 {cur_col + 1}")
-        self.cells["hand"].config(text="LR"[g.line[g.pos][2]])
+        t.mark_set("insert", "1.0")
+        t.xview_moveto(0)
+        self.cells["pos"].config(text="行 1, 列 3")
+        self.cells["hand"].config(text="LR"[g.line[0][2]])
 
     # ---------- 이동 모드 ----------
     def start_flow(self):
@@ -473,7 +474,6 @@ class Memo:
         # 판정 틀: 실제 게임처럼 원 두 개. 먼저 만들어서 노트가 그 위를 지나가게 함
         self.ring_in = c.create_oval(0, 0, 0, 0, fill=RING_FILL, outline="")
         self.ring_out = c.create_oval(0, 0, 0, 0, outline=RING_COLOR, width=1)
-        self.mark = c.create_text(0, 0, text="^", anchor="nw", font=self.font)
         self.judge_text = c.create_text(0, 0, text="", anchor="nw", font=self.font)
         self.judge_until = 0
         self.shown_hand = None
@@ -513,22 +513,18 @@ class Memo:
                     c.delete(n.item)
                     n.item = None
                 continue
-            if n.item is None:
+            if n.item is None:  # 놓친 노트도 원래 색 그대로 흘러감
                 n.item = c.create_text(x, y0, text=DOT, anchor="nw", font=self.font,
                                        fill=DON_COLOR if n.t == "D" else KA_COLOR)
             else:
                 c.coords(n.item, x, y0)
-            if n.res:  # 놓친 노트는 회색으로 흘러감
-                c.itemconfig(n.item, fill=DONE_COLOR)
         cx, cy = x0 + cw / 2, y0 + lh * DOT_CY  # 판정 위치에 온 노트(점)의 가운데
         for ring, r in ((self.ring_in, lh * 0.25), (self.ring_out, lh * 0.45)):
             c.coords(ring, cx - r, cy - r, cx + r, cy + r)
-        c.coords(self.mark, x0, y0 + lh)
-        c.coords(self.judge_text, x0 + 2 * cw, y0 + lh)
+        c.coords(self.judge_text, x0, y0 + lh)  # 판정 원 바로 아래
         if now > self.judge_until:
             c.itemconfig(self.judge_text, text="")
-        n = f.upcoming()
-        hand = "LR"[n.h] if n else ""
+        hand = "LR"[f.hand]
         if hand != self.shown_hand:
             self.cells["hand"].config(text=hand)
             self.shown_hand = hand
