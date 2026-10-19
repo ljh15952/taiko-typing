@@ -1,8 +1,8 @@
 """
 돈카 타건 연습 - 메모장 모양 버전
   겉모양은 Windows 메모장과 같습니다.
-  돈(D): 왼손 f / 오른손 j
-  카(K): 왼손 d / 오른손 k
+  돈(D): 왼손 d / 오른손 k
+  카(K): 왼손 r / 오른손 i
   표시된 키를 정확히 쳐야 정답, 지금 칠 손(L/R)은 상태 표시줄에 표시
   モード(M) 메뉴
     ランダム: 묶음 길이 1~8타, 돈/카 랜덤
@@ -426,7 +426,7 @@ class Memo:
             elif e.keycode in ZOOM_RESET_KEYS:
                 self.set_zoom(100)
             return "break"
-        if ch and ch in "fdjk":
+        if ch in HAND_OF:  # KEY 에 있는 키만 타건으로 셈
             if self.flow:
                 now = time.perf_counter() - self.t0
                 res = self.flow.press(ch, now)
@@ -601,5 +601,5 @@ if __name__ == "__main__":
     app = Memo(root)
     root.update()
     set_notepad_icon(root)
-    disable_ime(root, app.text, app.canvas)  # 일본어 IME 가 켜져 있어도 f/d/j/k 가 바로 입력되도록
+    disable_ime(root, app.text, app.canvas)  # 일본어 IME 가 켜져 있어도 d/k/r/i 가 바로 입력되도록
     root.mainloop()
