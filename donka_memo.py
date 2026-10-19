@@ -20,7 +20,7 @@ import tkinter.simpledialog as simpledialog
 
 MIN_LEN, MAX_LEN = 1, 8   # 랜덤 모드 묶음 길이 범위
 GROUPS_PER_LINE = 5
-KEY = {"D": ("f", "j"), "K": ("d", "k")}  # (왼손, 오른손)
+KEY = {"D": ("d", "k"), "K": ("r", "i")}  # (왼손, 오른손)
 HAND_OF = {k: h for keys in KEY.values() for h, k in enumerate(keys)}  # 키 -> 손 (0=왼손, 1=오른손)
 FONT_FAMILY, FONT_SIZE = "Consolas", 11
 ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 10, 500, 10  # 메모장과 같은 10% 단위
